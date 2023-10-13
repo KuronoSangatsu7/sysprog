@@ -1,8 +1,37 @@
 #include "parser.h"
-
+#include <stdlib.h>
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
+
+static void
+execute_command(const struct expr *e)
+{
+	char* argv_arr[e->cmd.arg_count + 2];
+	argv_arr[0] = e->cmd.exe;
+
+	for (uint32_t i = 0; i < e->cmd.arg_count; ++i)
+		argv_arr[i + 1] = e->cmd.args[i];
+
+	argv_arr[e->cmd.arg_count + 1] = NULL;
+
+	if (strcmp(e->cmd.exe, "exit") == 0)
+	// TODO: handle exit | *some command*
+		exit(0);
+	
+	else if (strcmp(e->cmd.exe, "cd") == 0)
+		chdir(e->cmd.args[0]);
+
+	else {
+		pid_t p = fork();
+
+		if (p == 0)
+			execvp(e->cmd.exe, argv_arr);
+	}
+	
+	return;
+}
 
 static void
 execute_command_line(const struct command_line *line)
@@ -31,6 +60,9 @@ execute_command_line(const struct command_line *line)
 			for (uint32_t i = 0; i < e->cmd.arg_count; ++i)
 				printf(" %s", e->cmd.args[i]);
 			printf("\n");
+
+			execute_command(e);
+			
 		} else if (e->type == EXPR_TYPE_PIPE) {
 			printf("\tPIPE\n");
 		} else if (e->type == EXPR_TYPE_AND) {
