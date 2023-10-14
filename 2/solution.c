@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 static void
-execute_command(const struct expr *e)
+execute_command(const struct expr *e, bool read_from_pipe, bool write_to_pipe, int* pipedes)
 {
 	char* argv_arr[e->cmd.arg_count + 2];
 	argv_arr[0] = e->cmd.exe;
@@ -26,8 +26,18 @@ execute_command(const struct expr *e)
 	else {
 		pid_t p = fork();
 
-		if (p == 0)
+		if (p == 0) {
+			if (read_from_pipe)
+				dup2(pipedes[0], 0);
+
+			if (write_to_pipe)
+				dup2(pipedes[1], 1);
+
 			execvp(e->cmd.exe, argv_arr);
+
+			close(pipedes[0]);
+			close(pipedes[1]);
+		}
 	}
 	
 	return;
@@ -54,6 +64,10 @@ execute_command_line(const struct command_line *line)
 	}
 	printf("Expressions:\n");
 	const struct expr *e = line->head;
+
+	int pipedes[2];
+	bool read_from_pipe = false, write_to_pipe = false;
+
 	while (e != NULL) {
 		if (e->type == EXPR_TYPE_COMMAND) {
 			printf("\tCommand: %s", e->cmd.exe);
@@ -61,9 +75,29 @@ execute_command_line(const struct command_line *line)
 				printf(" %s", e->cmd.args[i]);
 			printf("\n");
 
-			execute_command(e);
+			if (e->next != NULL && e->next->type == EXPR_TYPE_PIPE) {
+				pipe(pipedes);
+				write_to_pipe = true;
+			}
+
+			// if (e->next == NULL) {
+			// 	if (line->out_type == OUTPUT_TYPE_FILE_NEW) {
+
+			// 	}
+
+			// 	if (line->out_type == OUTPUT_TYPE_FILE_APPEND) {
+
+			// 	}
+			// }
+
+			execute_command(e, read_from_pipe, write_to_pipe, pipedes);
+			
+			write_to_pipe = false;
+			read_from_pipe = false;
 			
 		} else if (e->type == EXPR_TYPE_PIPE) {
+			read_from_pipe = true;
+
 			printf("\tPIPE\n");
 		} else if (e->type == EXPR_TYPE_AND) {
 			printf("\tAND\n");
