@@ -4,9 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 static void
-execute_command(const struct expr *e, bool read_from_pipe, bool write_to_pipe, int* pipedes)
+execute_command(const struct expr *e, int read_from, int write_to, int (*pipedes)[2])
 {
 	char* argv_arr[e->cmd.arg_count + 2];
 	argv_arr[0] = e->cmd.exe;
@@ -27,19 +28,25 @@ execute_command(const struct expr *e, bool read_from_pipe, bool write_to_pipe, i
 		pid_t p = fork();
 
 		if (p == 0) {
-			if (read_from_pipe)
-				dup2(pipedes[0], 0);
+			if (read_from)
+			{
+				close(pipedes[read_from - 1][1]);
+				dup2(pipedes[read_from - 1][0], 0);
+			}
 
-			if (write_to_pipe)
-				dup2(pipedes[1], 1);
+			if (write_to) {
+				close(pipedes[write_to - 1][0]);
+				dup2(pipedes[write_to - 1][1], 1);
+			}
 
 			execvp(e->cmd.exe, argv_arr);
+		}
 
-			close(pipedes[0]);
-			close(pipedes[1]);
+		else {
+			wait(NULL);
 		}
 	}
-	
+
 	return;
 }
 
@@ -65,8 +72,7 @@ execute_command_line(const struct command_line *line)
 	printf("Expressions:\n");
 	const struct expr *e = line->head;
 
-	int pipedes[2];
-	bool read_from_pipe = false, write_to_pipe = false;
+	int pipedes[2][2], read_from = 0, write_to = 0;
 
 	while (e != NULL) {
 		if (e->type == EXPR_TYPE_COMMAND) {
@@ -76,11 +82,17 @@ execute_command_line(const struct command_line *line)
 			printf("\n");
 
 			if (e->next != NULL && e->next->type == EXPR_TYPE_PIPE) {
-				pipe(pipedes);
-				write_to_pipe = true;
+				if (read_from == 1) {
+					write_to = 2;
+				}
+				
+				else {
+					write_to = 1;
+				}
+				pipe(pipedes[write_to - 1]);
 			}
 
-			// if (e->next == NULL) {
+			// if (e->next != NULL) {
 			// 	if (line->out_type == OUTPUT_TYPE_FILE_NEW) {
 
 			// 	}
@@ -90,13 +102,11 @@ execute_command_line(const struct command_line *line)
 			// 	}
 			// }
 
-			execute_command(e, read_from_pipe, write_to_pipe, pipedes);
-			
-			write_to_pipe = false;
-			read_from_pipe = false;
-			
+			execute_command(e, read_from, write_to, pipedes);
+
 		} else if (e->type == EXPR_TYPE_PIPE) {
-			read_from_pipe = true;
+			read_from = write_to;
+			write_to = 0;
 
 			printf("\tPIPE\n");
 		} else if (e->type == EXPR_TYPE_AND) {
