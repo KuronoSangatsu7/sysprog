@@ -51,10 +51,10 @@ static void delete_pipes(int num_pipes, int *redirect_fd, int (*pd)[2]) {
     close(*redirect_fd);
 }
 
-static void execute_commands(const struct command_line *line, int num_pipes,
-                             int *redirect_fd, int (*pd)[2]) {
+static int execute_commands(const struct command_line *line, int num_pipes,
+                            int *redirect_fd, int (*pd)[2]) {
   struct expr *e = line->head;
-  int index = 0;
+  int index = 0, last_exit_code = 0;
   while (e != NULL) {
     if (e->type == EXPR_TYPE_COMMAND) {
       char *argv_arr[e->cmd.arg_count + 2];
@@ -67,33 +67,33 @@ static void execute_commands(const struct command_line *line, int num_pipes,
 
       if (strcmp(e->cmd.exe, "cd") == 0) {
         chdir(e->cmd.args[0]);
-        return;
-      }
+      } else {
 
-      pid_t p = fork();
-      if (p == 0) {
-        if (index > 0) {
-          dup2(pd[index - 1][0], STDIN_FILENO);
+        pid_t p = fork();
+        if (p == 0) {
+          if (index > 0) {
+            dup2(pd[index - 1][0], STDIN_FILENO);
+          }
+
+          if (index == num_pipes && *redirect_fd != -1) {
+            dup2(*redirect_fd, STDOUT_FILENO);
+          } else if (index < num_pipes) {
+            dup2(pd[index][1], STDOUT_FILENO);
+          }
+
+          for (int i = 0; i < num_pipes; i++) {
+            close(pd[i][0]);
+            close(pd[i][1]);
+          }
+
+          if (strcmp(e->cmd.exe, "exit") == 0) {
+            char *_true[2] = {"true", NULL};
+            execvp("true", _true);
+          }
+
+          execvp(e->cmd.exe, argv_arr);
+          exit(1);
         }
-
-        if (index == num_pipes && *redirect_fd != -1) {
-          dup2(*redirect_fd, STDOUT_FILENO);
-        } else if (index < num_pipes) {
-          dup2(pd[index][1], STDOUT_FILENO);
-        }
-
-        for (int i = 0; i < num_pipes; i++) {
-          close(pd[i][0]);
-          close(pd[i][1]);
-        }
-
-        if (strcmp(e->cmd.exe, "exit") == 0) {
-          char *_true[2] = {"true", NULL};
-          execvp("true", _true);
-        }
-
-        execvp(e->cmd.exe, argv_arr);
-        exit(1);
       }
 
       index++;
@@ -105,24 +105,36 @@ static void execute_commands(const struct command_line *line, int num_pipes,
   delete_pipes(num_pipes, redirect_fd, pd);
 
   for (int i = 0; i <= num_pipes; i++) {
-    wait(NULL);
+    int status = 0;
+    wait(&status);
+    last_exit_code = status;
+
+    if (status > 0)
+      last_exit_code = WEXITSTATUS(status);
+
   }
+
+  return last_exit_code;
 }
 
-static void execute_command_line(const struct command_line *line,
+static int execute_command_line(const struct command_line *line,
                                  int num_pipes) {
 
   int redirect_fd = -1;
   int pd[num_pipes][2];
+  int last_exit_code = 0;
 
   initialize_pipes(line, num_pipes, &redirect_fd, pd);
-  execute_commands(line, num_pipes, &redirect_fd, pd);
+  last_exit_code = execute_commands(line, num_pipes, &redirect_fd, pd);
+
+  return last_exit_code;
 }
 
 int main(void) {
   const size_t buf_size = 1024;
   char buf[buf_size];
   int rc;
+  int exit_code = 0;
   struct parser *p = parser_new();
   while ((rc = read(STDIN_FILENO, buf, buf_size)) > 0) {
     parser_feed(p, buf, rc);
@@ -150,10 +162,20 @@ int main(void) {
         exit(exit_code);
       }
 
-      execute_command_line(line, num_pipes);
+      exit_code = execute_command_line(line, num_pipes);
+
+      if (strcmp(line->tail->cmd.exe, "exit") == 0) {
+        if (line->tail->cmd.arg_count)
+          exit_code = atoi(line->tail->cmd.args[0]);
+
+        else
+          exit_code = 0;
+      }
+
+      
       command_line_delete(line);
     }
   }
   parser_delete(p);
-  return 0;
+  return exit_code;
 }
