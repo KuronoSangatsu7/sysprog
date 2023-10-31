@@ -448,6 +448,7 @@ main(void)
 
 	test_open();
 	test_close();
+	ufs_destroy();
 	test_io();
 	test_delete();
 	test_stress_open();
