@@ -47,6 +47,7 @@ struct file {
 	struct file *prev;
 
 	/* PUT HERE OTHER MEMBERS */
+	bool ghost;
 };
 
 /** List of all files. */
@@ -110,6 +111,7 @@ create_file(const char *filename)
 	new_file->name = malloc(strlen(filename) + 1);
 	strcpy(new_file->name, filename);
 	new_file->refs = 0;
+	new_file->ghost = false;
 
 	struct block * new_block = malloc(sizeof(struct block));
 	*new_block = (struct block) {
@@ -145,14 +147,22 @@ create_file(const char *filename)
 int
 delete_file(struct file *file)
 {
-	if (file == NULL) {
-		return -1;
+	struct block * current_block = file->block_list;
+	while(current_block != NULL) {
+		struct block * next_block = current_block->next;
+		free(current_block->memory);
+		free(current_block);
+		current_block = next_block;
 	}
 
-	if (file->refs != 0) {
-		return -1;
-	}
+	free(file->name);
+	free(file);
+	return 0;
+}
 
+int
+remove_file_from_tree(struct file *file)
+{
 	if (file->next == NULL && file->prev == NULL) {
 		file_list = NULL;
 	}
@@ -171,16 +181,6 @@ delete_file(struct file *file)
 		file->next->prev = file->prev;
 	}
 
-	struct block * current_block = file->block_list;
-	while(current_block != NULL) {
-		struct block * next_block = current_block->next;
-		free(current_block->memory);
-		free(current_block);
-		current_block = next_block;
-	}
-
-	free(file->name);
-	free(file);
 	return 0;
 }
 
@@ -218,6 +218,9 @@ remove_descriptor(int fd_id)
 	}
 
 	fd->file->refs --;
+	if (fd->file->ghost && fd->file->refs == 0) {
+		delete_file(fd->file);
+	}
 
 	free(fd);
 	file_descriptors[fd_id] = NULL;
@@ -377,7 +380,15 @@ ufs_delete(const char *filename)
 		return -1;
 	}
 
-	delete_file(file);
+	remove_file_from_tree(file);
+
+	if (file->refs > 0) {
+		file->ghost = true;
+	}
+	
+	else {
+		delete_file(file);
+	}
 
 	return 0;
 }
