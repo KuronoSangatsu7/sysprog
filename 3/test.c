@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define NEED_OPEN_FLAGS
-// #define NEED_RESIZE
+#define NEED_RESIZE
 
 static void
 test_open(void)

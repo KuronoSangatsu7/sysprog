@@ -228,37 +228,6 @@ remove_descriptor(int fd_id)
 	return 0;
 }
 
-int
-ufs_open(const char *filename, int flags)
-{
-	struct file * file = get_file(filename);
-	
-	bool CREATE = flags & UFS_CREATE;
-
-	if (!CREATE && file == NULL) {
-		ufs_error_code = UFS_ERR_NO_FILE;
-		return -1;
-	}
-	
-	if (file == NULL && CREATE)
-		file = create_file(filename);
-	
-	struct filedesc* fd = malloc(sizeof(struct filedesc));
-
-	fd->file = file;
-	fd->id = 0;
-	fd->current_block = file->block_list;
-	fd->block_offset = 0;
-	fd->flags = flags;
-
-	file->refs ++;
-
-	int fd_id = add_descriptor(fd);
-	fd -> id = fd_id;
-	
-	return fd_id;
-}
-
 char
 read_byte(struct filedesc *fd)
 {
@@ -328,6 +297,93 @@ read_from_file(struct filedesc *fd, char *buf, int size)
 		go_to_next_block(fd);
 	}
 	return bytes_read;
+}
+
+void 
+update_resize_file_descriptors(struct file *file, struct block *updated_last_block, int new_occupied)
+{
+    for (int i = 0; i < file_descriptor_count; ++i) {
+    struct filedesc *fd = file_descriptors[i];
+    
+	// - The file descriptor is not null
+    // - The file in the current descriptor matches the file we are modifying
+    // - The index of the current block in the descriptor is greater than the index of the new last block 
+    //   or if they are equal, the block offset in the descriptor is greater than the new occupied size.
+    // If all conditions are met, update the current block and block offset in the descriptor.
+
+    if (fd != NULL && 
+        fd->file == file && 
+        (fd->current_block->index > updated_last_block->index ||
+        (fd->current_block->index == updated_last_block->index &&
+         fd->block_offset > new_occupied))) {
+            
+        fd->current_block = updated_last_block;
+        fd->block_offset = new_occupied;
+    }
+}
+
+}
+
+void 
+free_resize_unused_blocks(struct block *updated_last_block, struct block *itr)
+{
+    while (itr != updated_last_block) {
+        struct block *next = itr->prev;
+        free(itr->memory);
+        free(itr);
+        itr = next;
+    }
+}
+
+void 
+resize_file(struct file *file, int new_size)
+{
+    struct block *updated_last_block = file->last_block;
+
+    while (updated_last_block->index * BLOCK_SIZE > new_size) {
+        updated_last_block = updated_last_block->prev;
+    }
+
+    int new_occupied = new_size - updated_last_block->index * BLOCK_SIZE;
+    updated_last_block->occupied = new_occupied;
+    updated_last_block->next = NULL;
+
+    update_resize_file_descriptors(file, updated_last_block, new_occupied);
+    free_resize_unused_blocks(updated_last_block, file->last_block);
+
+    file->last_block = updated_last_block;
+}
+
+
+int
+ufs_open(const char *filename, int flags)
+{
+	struct file * file = get_file(filename);
+	
+	bool CREATE = flags & UFS_CREATE;
+
+	if (!CREATE && file == NULL) {
+		ufs_error_code = UFS_ERR_NO_FILE;
+		return -1;
+	}
+	
+	if (file == NULL && CREATE)
+		file = create_file(filename);
+	
+	struct filedesc* fd = malloc(sizeof(struct filedesc));
+
+	fd->file = file;
+	fd->id = 0;
+	fd->current_block = file->block_list;
+	fd->block_offset = 0;
+	fd->flags = flags;
+
+	file->refs ++;
+
+	int fd_id = add_descriptor(fd);
+	fd -> id = fd_id;
+	
+	return fd_id;
 }
 
 ssize_t
@@ -410,4 +466,22 @@ ufs_destroy(void)
 		delete_file(current_file);
 		current_file = file_list;
 	}
+}
+
+int
+ufs_resize(int fd, size_t new_size)
+{
+	struct filedesc * file_descriptor = get_file_descriptor(fd);
+	if (file_descriptor == NULL) {
+		ufs_error_code = UFS_ERR_NO_FILE;
+		return -1;
+	}
+
+	if (new_size > MAX_FILE_SIZE) {
+		ufs_error_code = UFS_ERR_NO_MEM;
+		return -1;
+	}
+
+	resize_file(file_descriptor->file, new_size);
+	return 0;
 }
