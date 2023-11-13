@@ -12,6 +12,7 @@ struct thread_task
 	int index;
 	bool is_finished;
 	bool is_running;
+	bool detached;
 
 	pthread_cond_t done_cond;
 	struct thread_pool *pool;
@@ -55,24 +56,32 @@ void join_thread_task(struct thread_task *task)
 		pthread_cond_wait(&task->done_cond, &pool->lock);
 	}
 
-	swap_tasks(task, pool->tasks[pool->pushed_tasks_count - 1]);
 	pool->pushed_tasks_count--;
+	swap_tasks(task, pool->tasks[pool->pushed_tasks_count]);
 
 	task->pool = NULL;
 	task->index = -1;
 	task->is_running = false;
 }
 
-void execute_task(struct thread_task *task_to_execute)
+void execute_task(struct thread_task *task_to_execute, struct thread_pool *pool)
 {
-	void *result = task_to_execute->function(task_to_execute->arg);
+    void *result = task_to_execute->function(task_to_execute->arg);
 
-	pthread_mutex_lock(&task_to_execute->pool->lock);
-	task_to_execute->result = result;
-	task_to_execute->pool->running_tasks_count--;
-	pthread_cond_broadcast(&task_to_execute->done_cond);
-	task_to_execute->is_finished = true;
-	pthread_mutex_unlock(&task_to_execute->pool->lock);
+    pthread_mutex_lock(&pool->lock);
+
+    task_to_execute->result = result;
+    pool->running_tasks_count--;
+    pthread_cond_broadcast(&task_to_execute->done_cond);
+    task_to_execute->is_finished = true;
+
+    if (task_to_execute->detached)
+    {
+        join_thread_task(task_to_execute);
+        thread_task_delete(task_to_execute);
+    }
+	
+    pthread_mutex_unlock(&pool->lock);
 }
 
 void *thread_func(void *arg)
@@ -102,7 +111,7 @@ void *thread_func(void *arg)
 		task_to_execute->is_running = true;
 		pthread_mutex_unlock(&pool->lock);
 
-		execute_task(task_to_execute);
+		execute_task(task_to_execute, pool);
 	}
 }
 
@@ -184,6 +193,7 @@ int thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 	pool->tasks[pool->pushed_tasks_count++] = task;
 	task->index = pool->pushed_tasks_count - 1;
 	pool->pending_tasks_count++;
+	
 	if (pool->running_tasks_count == pool->thread_count && pool->thread_count < pool->max_thread_count)
 	{
 		pthread_create(&pool->threads[pool->thread_count++], NULL, thread_func, pool);
@@ -210,6 +220,7 @@ int thread_task_new(struct thread_task **task, thread_task_f function, void *arg
 		.arg = arg,
 		.is_finished = false,
 		.is_running = false,
+		.detached = false,
 		.pool = NULL,
 		.index = -1};
 	pthread_cond_init(&new_task->done_cond, NULL);
@@ -261,6 +272,27 @@ int thread_task_join(struct thread_task *task, void **result)
 	pthread_mutex_lock(&pool->lock);
 	join_thread_task(task);
 	*result = task->result;
+	pthread_mutex_unlock(&pool->lock);
+
+	return 0;
+}
+
+int thread_task_detach(struct thread_task *task)
+{
+	if (task->pool == NULL)
+		return TPOOL_ERR_TASK_NOT_PUSHED;
+	struct thread_pool *pool = task->pool;
+
+	pthread_mutex_lock(&pool->lock);
+	if (task->is_finished)
+	{
+		join_thread_task(task);
+		thread_task_delete(task);
+	}
+	else
+	{
+		task->detached = true;
+	}
 	pthread_mutex_unlock(&pool->lock);
 
 	return 0;
