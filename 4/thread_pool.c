@@ -2,6 +2,9 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <sys/time.h>
+#include <time.h>
+#include <errno.h>
 
 struct thread_task
 {
@@ -66,22 +69,22 @@ void join_thread_task(struct thread_task *task)
 
 void execute_task(struct thread_task *task_to_execute, struct thread_pool *pool)
 {
-    void *result = task_to_execute->function(task_to_execute->arg);
+	void *result = task_to_execute->function(task_to_execute->arg);
 
-    pthread_mutex_lock(&pool->lock);
+	pthread_mutex_lock(&pool->lock);
 
-    task_to_execute->result = result;
-    pool->running_tasks_count--;
-    pthread_cond_broadcast(&task_to_execute->done_cond);
-    task_to_execute->is_finished = true;
+	task_to_execute->result = result;
+	pool->running_tasks_count--;
+	pthread_cond_broadcast(&task_to_execute->done_cond);
+	task_to_execute->is_finished = true;
 
-    if (task_to_execute->detached)
-    {
-        join_thread_task(task_to_execute);
-        thread_task_delete(task_to_execute);
-    }
-	
-    pthread_mutex_unlock(&pool->lock);
+	if (task_to_execute->detached)
+	{
+		join_thread_task(task_to_execute);
+		thread_task_delete(task_to_execute);
+	}
+
+	pthread_mutex_unlock(&pool->lock);
 }
 
 void *thread_func(void *arg)
@@ -193,7 +196,7 @@ int thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 	pool->tasks[pool->pushed_tasks_count++] = task;
 	task->index = pool->pushed_tasks_count - 1;
 	pool->pending_tasks_count++;
-	
+
 	if (pool->running_tasks_count == pool->thread_count && pool->thread_count < pool->max_thread_count)
 	{
 		pthread_create(&pool->threads[pool->thread_count++], NULL, thread_func, pool);
@@ -293,6 +296,113 @@ int thread_task_detach(struct thread_task *task)
 	{
 		task->detached = true;
 	}
+	pthread_mutex_unlock(&pool->lock);
+
+	return 0;
+}
+
+// Constant used for time conversions
+const long NSEC_PER_SEC = 1e9;
+const long MILSEC_PER_SEC = 1e3;
+
+// Credit to https://github.com/solemnwarning
+// for the following functions
+// https://github.com/solemnwarning/timespec/blob/master/timespec.c
+// ---------------------------------------------------------------------
+struct timespec timespec_normalise(struct timespec ts)
+{
+	while (ts.tv_nsec >= NSEC_PER_SEC)
+	{
+		++(ts.tv_sec);
+		ts.tv_nsec -= NSEC_PER_SEC;
+	}
+
+	while (ts.tv_nsec <= -NSEC_PER_SEC)
+	{
+		--(ts.tv_sec);
+		ts.tv_nsec += NSEC_PER_SEC;
+	}
+
+	if (ts.tv_nsec < 0)
+	{
+		--(ts.tv_sec);
+		ts.tv_nsec = (NSEC_PER_SEC + ts.tv_nsec);
+	}
+
+	return ts;
+}
+
+struct timespec timespec_add(struct timespec ts1, struct timespec ts2)
+{
+	ts1 = timespec_normalise(ts1);
+	ts2 = timespec_normalise(ts2);
+
+	ts1.tv_sec += ts2.tv_sec;
+	ts1.tv_nsec += ts2.tv_nsec;
+
+	return timespec_normalise(ts1);
+}
+
+struct timespec timespec_from_ms(long milliseconds)
+{
+	struct timespec ts = {
+		.tv_sec = (milliseconds / 1000),
+		.tv_nsec = (milliseconds % 1000) * 1000000,
+	};
+
+	return timespec_normalise(ts);
+}
+
+struct timespec timespec_from_timeval(struct timeval tv)
+{
+	struct timespec ts = {
+		.tv_sec = tv.tv_sec,
+		.tv_nsec = tv.tv_usec * 1000};
+
+	return timespec_normalise(ts);
+}
+// ---------------------------------------------------------------------
+
+struct timespec timespec_now()
+{
+	struct timeval now;
+
+	gettimeofday(&now, NULL);
+	return timespec_from_timeval(now);
+}
+
+int thread_task_timed_join(struct thread_task *task, double timeout, void **result)
+{
+	if (task->pool == NULL)
+	{
+		return TPOOL_ERR_TASK_NOT_PUSHED;
+	}
+
+	struct thread_pool *pool = task->pool;
+
+	pthread_mutex_lock(&pool->lock);
+
+	struct timespec timeout_spec = timespec_add(
+		timespec_now(),
+		timespec_from_ms((long long)(timeout * (double)MILSEC_PER_SEC)));
+
+	while (!task->is_finished)
+	{
+		if (ETIMEDOUT == pthread_cond_timedwait(&task->done_cond, &pool->lock, &timeout_spec))
+		{
+			pthread_mutex_unlock(&pool->lock);
+			return TPOOL_ERR_TIMEOUT;
+		}
+	}
+
+	pool->pushed_tasks_count--;
+	swap_tasks(task, pool->tasks[pool->pushed_tasks_count]);
+
+	task->pool = NULL;
+	task->index = -1;
+	task->is_running = false;
+
+	*result = task->result;
 	pthread_mutex_unlock(&pool->lock);
 
 	return 0;
